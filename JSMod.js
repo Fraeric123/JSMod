@@ -535,6 +535,7 @@ export class AssetManager {
         this.hdrLoader = new RGBELoader();
 
         this.assetList = null // name, [type, path]
+        this.loadedAssets = new Map();
     }
 
     async svgToTexture(svgString, width, height) {
@@ -634,9 +635,18 @@ export class AssetManager {
         return new AnimTex(canvases, delays);
     }
 
+    getAsset(name) {
+        const entry = this.loadedAssets.get(name);
+        if (!entry) {
+            console.warn(`Asset "${name}" nenalezen.`);
+            return null;
+        }
+        return entry.data;
+    }
+
     async init() {
         this.assetList = this.engine.asset_list;
-        for (const [name, [type, path]] of Object.entries(this.assetList)) {
+        for (const [name, { type, path }] of this.assetList) {
             try {
                 let asset;
                 if (type === "font") {
@@ -645,7 +655,8 @@ export class AssetManager {
                 } else if (type === "svg") {
                     const svgResponse = await fetch(path);
                     const svgText = await svgResponse.text();
-                    asset = await this.svgToTexture(svgText, 256, 256);
+                    const canvas = await this.svgToTexture(svgText, 256, 256);
+                    asset = new Texture(canvas);
                 } else if (type === "gif") {
                     asset = await this.loadGifAsAnimTex(path);
                 } else if (type === "webp") {
@@ -659,8 +670,8 @@ export class AssetManager {
                     });
                     asset = new Texture(img);
                 }
-                this.engine[name] = asset;
-                console.log(`Asset "${name}" načten.`);
+                this.loadedAssets.set(name, { asset_type: type, data: asset });
+                console.log(`Asset "${name}" typu "${type}" načten.`);
             } catch (err) {
                 console.error(`Chyba při načítání assetu "${name}": ${path}`, err);
             }
@@ -787,7 +798,6 @@ export class InputManager {
     async init() {
         this.engine.canvas_manager.canvas2D.addEventListener('mousemove', (e) => {
             const { x, y } = this.getMouseCanvasPos(e.clientX, e.clientY);
-            console.log(`Mouse moved: (${x.toFixed(2)}, ${y.toFixed(2)})`);
             this.mouse.x = x;
             this.mouse.y = y;
         });
@@ -879,17 +889,25 @@ export class UIElement {
         this.h = h;
 
         this.visible = true;
-        this.opacity = 1;
         this.rotation = 0;
-        this.style = "white";
+
+        this.bg_opacity = 0;
+        this.bg_style = "black";
+        
         this.font = "Arial";
+        this.text_style = "white";
+        this.text_opacity = 1;
         this.fontSize = 30;
         this.text = "";
+
+        this.texture_opacity = 1;
         this.texture = null;
         this.pivot = { x: 0, y: 0 };
 
-        this._onUpdate = () => { };
-        this._onRender = () => { };
+        this.selectable = false;
+
+        this._onUpdate = (deltaTime) => { };
+        this._onRender = (screen) => { };
         this._onClick = () => { };
         this._onHover = () => { };
         this._onHoverEnd = () => { };
@@ -898,19 +916,19 @@ export class UIElement {
     }
 
     update(deltaTime) {
-        this._onUpdate();
+        this._onUpdate(deltaTime);
     }
 
     render(screen) {
-        this._onRender();
+        this._onRender(screen);
         if (!this.visible) return;
+        screen.drawRect(this.x, this.y, this.w, this.h, this.bg_style, this.bg_opacity, this.rotation);
         if (this.texture) {
-            this.texture.draw(screen, this.x + this.pivot.x, this.y + this.pivot.y, this.w, this.h, this.opacity, this.rotation);
-        } else if (this.text) {
-            screen.drawText(this.x + this.pivot.x, this.y + this.pivot.y, this.text, this.fontSize, this.style, this.opacity, this.rotation, this.font);
-        } else {
-            screen.drawRect(this.x + this.pivot.x, this.y + this.pivot.y, this.w, this.h, this.style, this.opacity, this.rotation);
+            this.texture.draw(screen, this.x, this.y, this.w, this.h, this.texture_opacity, this.rotation);
         }
+        if (this.text) {
+            screen.drawText(this.x, this.y, this.text, this.fontSize, this.text_style, this.text_opacity, this.rotation, this.font);
+        }        
     }
 }
 
@@ -925,15 +943,25 @@ export class UIManager {
 
     async init() {
         this.canvas_renderer = this.engine.canvas_renderer;
-        
+
         // Example UI element
-        const exampleElement = new UIElement({ x: 1280, y: 720, w: 200, h: 100 });
+        const exampleElement = new UIElement({ x: 1280, y: 720, w: 200, h: 200 });
         exampleElement.text = "Hello, JSMod!";
-        exampleElement.style = "cyan";
-        exampleElement._onUpdate = () => {
-            exampleElement.rotation += 0.5;
+        exampleElement.bg_style = "cyan";
+        exampleElement.texture = this.engine.asset_manager.getAsset("anim_test");
+        exampleElement._onUpdate = (deltaTime) => {
+            exampleElement.rotation += 90 * deltaTime;
         };
         this.ui_elements.push(exampleElement);
+
+        const exampleElement2 = new UIElement({ x: 1480, y: 720, w: 200, h: 200 });
+        exampleElement2.text = "Hello, JSMod!";
+        exampleElement2.bg_style = "cyan";
+        exampleElement2.texture = this.engine.asset_manager.getAsset("anim_test");
+        exampleElement2._onUpdate = (deltaTime) => {
+            exampleElement2.rotation += 90 * deltaTime;
+        };
+        this.ui_elements.push(exampleElement2);
     }
 
     update(deltaTime) {
@@ -965,16 +993,20 @@ export class JSMod {
 
     // Asset Management
     addAsset(name, type, path) {
-        this.asset_list.set(name, { type, path });
+        this.asset_list.set(name, { type: type, path: path });
         return this;
+    }
+
+    getAsset(name) {
+        return this.asset_manager.getAsset(name);
     }
 
     async init() {
         await this.canvas_manager.init();
         await this.canvas_renderer.init();
         await this.input_manager.init();
-        await this.ui_manager.init();
         await this.asset_manager.init();
+        await this.ui_manager.init();
 
         requestAnimationFrame(() => this.loop());
     }
