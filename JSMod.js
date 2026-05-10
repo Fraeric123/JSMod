@@ -468,6 +468,8 @@ import { TAARenderPass } from './libs/postprocessing/TAARenderPass.js';
     }]
 }, {}, [4]);
 
+// Help funtions
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 
 export class Sound {
@@ -508,10 +510,11 @@ export class AnimTex {
         this.frames = frames;
         this.delays = delays.length ? delays : new Array(frames.length).fill(100);
         this.startTime = performance.now();
+        this.totalDuration = this.delays.reduce((a, b) => a + b, 0);
     }
     draw(screen, posx, posy, w, h, opa, rot) {
         if (!this.frames.length) return;
-        const total = this.delays.reduce((a, b) => a + b, 0);
+        const total = this.totalDuration;
         let t = (performance.now() - this.startTime) % total;
         let frameIndex = 0;
         for (let i = 0; i < this.delays.length; i++) {
@@ -534,7 +537,7 @@ export class AssetManager {
         this.audioLoader = new THREE.AudioLoader();
         this.hdrLoader = new RGBELoader();
 
-        this.assetList = null // name, [type, path]
+        this.assetList = null // name, [type, path, options]
         this.loadedAssets = new Map();
     }
 
@@ -644,13 +647,53 @@ export class AssetManager {
         return entry.data;
     }
 
+    drawLoadingScreen(name, type, progress) {
+        const renderer = this.engine.canvas_renderer;
+        const cw = this.engine.canvas_manager.renderWidth;
+        const ch = this.engine.canvas_manager.renderHeight;
+
+        renderer.clear2D();
+        renderer.drawRect(cw / 2, ch / 2, cw, ch, "black", 1);
+
+        const barW = 600;
+        const barH = 2;
+        const x = cw / 2;
+        const y = ch / 2;
+
+        renderer.drawRect(x, y, barW, barH, "#333333", 1);
+
+        const fillW = barW * progress;
+        const fillX = (x - barW / 2) + fillW / 2;
+        if (progress > 0) {
+            renderer.drawRect(fillX, y, fillW, barH, "white", 1);
+        }
+
+        const percent = Math.floor(progress * 100);
+        renderer.drawText(x, y - 40, `${percent}%`, 18, "white", 1, 0, "Courier New, monospace");
+
+        const detailText = (type ? `LOADING: ${name} | TYPE: ${type}` : `LOADING: ${name}`).toUpperCase();
+        renderer.drawText(x, y + 40, detailText, 12, "#aaaaaa", 1, 0, "Arial");
+
+        const totalAssets = this.assetList.size;
+        const loadedCount = Math.floor(progress * totalAssets);
+        renderer.drawText(x, y + 65, `[ ${loadedCount} / ${totalAssets} ]`, 12, "#666666", 1, 0, "Courier New");
+    }
+
     async init() {
         this.assetList = this.engine.asset_list;
-        for (const [name, { type, path }] of this.assetList) {
+        const totalAssets = this.assetList.size;
+        let loadedCount = 0;
+
+        for (const [name, { type, path, options }] of this.assetList) {
             try {
+                const progress = loadedCount / totalAssets;
+
+                this.drawLoadingScreen(name, type, progress);
+
                 let asset;
                 if (type === "font") {
                     await this.loadFont(name, path);
+                    loadedCount++;
                     continue;
                 } else if (type === "svg") {
                     const svgResponse = await fetch(path);
@@ -670,12 +713,23 @@ export class AssetManager {
                     });
                     asset = new Texture(img);
                 }
-                this.loadedAssets.set(name, { asset_type: type, data: asset });
+
+                this.loadedAssets.set(name, { asset_type: type, path: path, options: options, data: asset });
                 console.log(`Asset "${name}" typu "${type}" načten.`);
+
+                loadedCount++;
+
             } catch (err) {
                 console.error(`Chyba při načítání assetu "${name}": ${path}`, err);
+                loadedCount++;
             }
+
+            await sleep(10);
         }
+
+        this.drawLoadingScreen("Done", "", 1);
+        await sleep(20);
+        this.engine.canvas_renderer.clear2D();
     }
 }
 
@@ -893,16 +947,17 @@ export class UIElement {
 
         this.bg_opacity = 0;
         this.bg_style = "black";
-        
+
         this.font = "Arial";
         this.text_style = "white";
         this.text_opacity = 1;
-        this.fontSize = 30;
+        this.text_size = 30;
         this.text = "";
+        this.text_offset_x = 0;
+        this.text_offset_y = 0;
 
         this.texture_opacity = 1;
         this.texture = null;
-        this.pivot = { x: 0, y: 0 };
 
         this.selectable = false;
 
@@ -927,8 +982,21 @@ export class UIElement {
             this.texture.draw(screen, this.x, this.y, this.w, this.h, this.texture_opacity, this.rotation);
         }
         if (this.text) {
-            screen.drawText(this.x, this.y, this.text, this.fontSize, this.text_style, this.text_opacity, this.rotation, this.font);
-        }        
+            const rad = this.rotation * Math.PI / 180;
+            const rotatedX = this.text_offset_x * Math.cos(rad) + this.text_offset_y * Math.sin(rad);
+            const rotatedY = this.text_offset_x * Math.sin(rad) + this.text_offset_y * Math.cos(rad);
+
+            screen.drawText(
+                this.x + rotatedX,
+                this.y + rotatedY,
+                this.text,
+                this.text_size,
+                this.text_style,
+                this.text_opacity,
+                this.rotation,
+                this.font
+            );
+        }
     }
 }
 
@@ -943,31 +1011,53 @@ export class UIManager {
 
     async init() {
         this.canvas_renderer = this.engine.canvas_renderer;
+    }
 
-        // Example UI element
-        const exampleElement = new UIElement({ x: 1280, y: 720, w: 200, h: 200 });
-        exampleElement.text = "Hello, JSMod!";
-        exampleElement.bg_style = "cyan";
-        exampleElement.texture = this.engine.asset_manager.getAsset("anim_test");
-        exampleElement._onUpdate = (deltaTime) => {
-            exampleElement.rotation += 90 * deltaTime;
-        };
-        this.ui_elements.push(exampleElement);
+    worldToLocal(mx, my, e) {
+        const dx = mx - e.x;
+        const dy = my - e.y;
 
-        const exampleElement2 = new UIElement({ x: 1480, y: 720, w: 200, h: 200 });
-        exampleElement2.text = "Hello, JSMod!";
-        exampleElement2.bg_style = "cyan";
-        exampleElement2.texture = this.engine.asset_manager.getAsset("anim_test");
-        exampleElement2._onUpdate = (deltaTime) => {
-            exampleElement2.rotation += 90 * deltaTime;
+        const rad = e.rotation * Math.PI / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+
+        return {
+            x: dx * cos - dy * sin,
+            y: dx * sin + dy * cos
         };
-        this.ui_elements.push(exampleElement2);
     }
 
     update(deltaTime) {
+        const mouse = this.engine.input_manager.mouse;
+        let anyHovered = false;
+
         for (const element of this.ui_elements) {
             element.update(deltaTime);
+
+            if (element.selectable) {
+                const p = this.worldToLocal(mouse.x, mouse.y, element);
+
+                const hovered =
+                    Math.abs(p.x) <= element.w / 2 &&
+                    Math.abs(p.y) <= element.h / 2;
+
+                if (hovered) {
+                    anyHovered = true;
+                    if (!element._hovered) {
+                        element._hovered = true;
+                        element._onHover();
+                    }
+                    if (mouse.clicked) {
+                        element._onClick();
+                        mouse.clicked = false;
+                    }
+                } else if (element._hovered) {
+                    element._hovered = false;
+                    element._onHoverEnd();
+                }
+            }
         }
+        this.engine.canvas_manager.canvas2D.style.cursor = anyHovered ? "pointer" : "default";
     }
 
     render() {
@@ -986,19 +1076,21 @@ export class JSMod {
         this.ui_manager = new UIManager(this);
         this.asset_manager = new AssetManager(this);
 
-        this.asset_list = new Map(); // name, [type, path]
+        this.asset_list = new Map(); // name, [type, path, options]
 
         this.lastFrame = performance.now();
     }
 
     // Asset Management
-    addAsset(name, type, path) {
-        this.asset_list.set(name, { type: type, path: path });
+    addAsset(name, type, path, options = {}) {
+        this.asset_list.set(name, { type: type, path: path, options: options });
         return this;
     }
 
     getAsset(name) {
-        return this.asset_manager.getAsset(name);
+        const entry = this.loadedAssets.get(name);
+        if (!entry || !entry.data) return null;
+        return entry.data;
     }
 
     async init() {
@@ -1012,8 +1104,8 @@ export class JSMod {
     }
 
     update(deltaTime) {
-        this.input_manager.update(deltaTime);
         this.ui_manager.update(deltaTime);
+        this.input_manager.update(deltaTime);
     }
 
     render() {
